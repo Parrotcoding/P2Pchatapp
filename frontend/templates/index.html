@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lantern Chat</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="identity" id="identity-card">
+          <div class="avatar" id="identity-avatar"></div>
+          <div>
+            <h1 class="title">Lantern Chat</h1>
+            <p class="subtitle">
+              Connected as <strong id="identity-name">Guest</strong>
+              <button id="edit-identity" class="edit-identity" title="Edit name">✎</button>
+            </p>
+          </div>
+        </div>
+        <div class="status-pill" id="network-status">Connecting…</div>
+      </header>
+      <div class="app-body">
+        <aside class="sidebar">
+          <div class="sidebar-header">
+            <h2>Nearby Devices</h2>
+            <button class="refresh" id="refresh-contacts" title="Refresh contact list">↻</button>
+          </div>
+          <div class="contacts" id="contact-list"></div>
+          <div class="cookie-note">
+            Known devices are saved as cookies so Lantern can welcome friends instantly when they return.
+          </div>
+        </aside>
+        <main class="chat-area">
+          <div class="chat-tabs" id="chat-tabs"></div>
+          <section class="chat-panel" id="chat-panel">
+            <div class="placeholder" id="chat-placeholder">
+              <h2>Start a conversation</h2>
+              <p>
+                Select a device on the left to open a secure WebRTC channel. Send messages, share files, and keep multiple chats
+                active at once.
+              </p>
+            </div>
+            <div class="conversation" id="conversation" hidden>
+              <header class="conversation-header">
+                <div>
+                  <h2 id="conversation-name"></h2>
+                  <p id="conversation-note"></p>
+                </div>
+              </header>
+              <div class="message-scroll" id="message-list"></div>
+              <form class="composer" id="message-form">
+                <textarea id="message-input" placeholder="Type a message" rows="1"></textarea>
+                <div class="composer-actions">
+                  <label class="file-upload">
+                    <input type="file" id="file-input" hidden />
+                    <span>📎</span>
+                  </label>
+                  <button type="submit" class="send-button">Send</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <template id="contact-template">
+      <button class="contact">
+        <span class="presence-indicator"></span>
+        <span class="contact-name"></span>
+      </button>
+    </template>
+    <template id="tab-template">
+      <button class="chat-tab">
+        <span class="tab-avatar"></span>
+        <span class="tab-name"></span>
+        <span class="tab-unread" hidden></span>
+        <span class="tab-close">×</span>
+      </button>
+    </template>
+    <template id="message-template">
+      <div class="message">
+        <div class="bubble">
+          <span class="bubble-content"></span>
+        </div>
+        <div class="meta"></div>
+      </div>
+    </template>
+    <template id="file-template">
+      <div class="message file">
+        <div class="bubble">
+          <div class="file-pill">
+            <span class="file-icon">📄</span>
+            <div class="file-meta">
+              <span class="file-name"></span>
+              <span class="file-size"></span>
+            </div>
+          </div>
+        </div>
+        <div class="meta"></div>
+      </div>
+    </template>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
