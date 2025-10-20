@@ -1,716 +1,341 @@
-const SIGNALING_URL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/signaling`;
-const IDENTITY_COOKIE = "lantern_identity";
-const CONTACT_COOKIE = "lantern_contacts";
+const state = {
+  contacts: [],
+  knownContacts: [],
+  chats: {},
+  openChats: [],
+  activeChatId: null,
+  eventsSocket: null,
+};
 
-const STUN_CONFIG = [{ urls: "stun:stun.l.google.com:19302" }];
+const contactListEl = document.getElementById("contact-list");
+const tabsEl = document.getElementById("chat-tabs");
+const placeholderEl = document.getElementById("chat-placeholder");
+const conversationEl = document.getElementById("conversation");
+const messageListEl = document.getElementById("message-list");
+const formEl = document.getElementById("message-form");
+const messageInputEl = document.getElementById("message-input");
+const fileInputEl = document.getElementById("file-input");
+const conversationNameEl = document.getElementById("conversation-name");
+const conversationAddressEl = document.getElementById("conversation-address");
+const statusEl = document.getElementById("network-status");
 
-function randomName() {
-  const animals = ["Otter", "Fox", "Dolphin", "Panda", "Tiger", "Falcon", "Koala", "Lynx", "Heron", "Orca"];
-  const colors = ["Amber", "Cobalt", "Emerald", "Indigo", "Scarlet", "Violet", "Saffron", "Ivory", "Slate", "Coral"];
-  return `${colors[Math.floor(Math.random() * colors.length)]} ${animals[Math.floor(Math.random() * animals.length)]}`;
+function parseCookies() {
+  return document.cookie.split("; ").reduce((acc, pair) => {
+    const [key, ...rest] = pair.split("=");
+    if (!key) return acc;
+    acc[decodeURIComponent(key)] = decodeURIComponent(rest.join("="));
+    return acc;
+  }, {});
 }
 
-function randomColor() {
-  const palette = ["#FF6B6B", "#F7B267", "#FFD166", "#06D6A0", "#4ECDC4", "#1A8FE3", "#A363D9", "#F46036"];
-  return palette[Math.floor(Math.random() * palette.length)];
-}
-
-function readCookie(name) {
-  const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
-function writeCookie(name, value, days = 365) {
-  const expires = new Date(Date.now() + days * 864e5).toUTCString();
-  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
-}
-
-function base64FromArrayBuffer(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
+function saveContactsToCookies(contacts) {
+  try {
+    const encoded = encodeURIComponent(JSON.stringify(contacts));
+    document.cookie = `lantern_contacts=${encoded}; max-age=${60 * 60 * 24 * 14}; path=/; SameSite=Lax`;
+  } catch (err) {
+    console.warn("Unable to persist contacts", err);
   }
-  return btoa(binary);
 }
 
-function arrayBufferFromBase64(base64) {
-  const binary = atob(base64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-class LanternApp {
-  constructor() {
-    this.identity = this.loadIdentity();
-    this.socket = null;
-    this.clientId = null;
-    this.contacts = new Map();
-    this.sessions = new Map();
-    this.activeChat = null;
-
-    this.contactList = document.querySelector("#contact-list");
-    this.tabContainer = document.querySelector("#chat-tabs");
-    this.messageList = document.querySelector("#message-list");
-    this.placeholder = document.querySelector("#chat-placeholder");
-    this.conversation = document.querySelector("#conversation");
-    this.conversationName = document.querySelector("#conversation-name");
-    this.conversationNote = document.querySelector("#conversation-note");
-
-    this.identityName = document.querySelector("#identity-name");
-    this.identityAvatar = document.querySelector("#identity-avatar");
-    this.networkStatus = document.querySelector("#network-status");
-
-    this.messageForm = document.querySelector("#message-form");
-    this.messageInput = document.querySelector("#message-input");
-    this.fileInput = document.querySelector("#file-input");
-
-    this.bindEvents();
-    this.renderIdentity();
-    this.restoreContactsFromCookie();
-    this.connect();
-  }
-
-  loadIdentity() {
+function loadContactsFromCookies() {
+  const cookies = parseCookies();
+  if (cookies.lantern_contacts) {
     try {
-      const cookie = readCookie(IDENTITY_COOKIE);
-      if (cookie) {
-        const value = JSON.parse(cookie);
-        if (value && value.name && value.color) {
-          return value;
-        }
-      }
+      const contacts = JSON.parse(cookies.lantern_contacts);
+      state.knownContacts = contacts;
     } catch (err) {
-      console.warn("Failed to parse identity cookie", err);
-    }
-    const identity = { name: randomName(), color: randomColor() };
-    writeCookie(IDENTITY_COOKIE, JSON.stringify(identity));
-    return identity;
-  }
-
-  renderIdentity() {
-    this.identityName.textContent = this.identity.name;
-    this.identityAvatar.style.setProperty("--avatar-color", this.identity.color);
-  }
-
-  bindEvents() {
-    document.querySelector("#edit-identity").addEventListener("click", () => {
-      const newName = prompt("Choose a display name", this.identity.name);
-      if (!newName) {
-        return;
-      }
-      this.identity.name = newName.trim().slice(0, 40) || this.identity.name;
-      writeCookie(IDENTITY_COOKIE, JSON.stringify(this.identity));
-      this.renderIdentity();
-      this.sendProfile();
-    });
-
-    document.querySelector("#refresh-contacts").addEventListener("click", () => {
-      this.pingPresence();
-    });
-
-    this.messageForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const value = this.messageInput.value.trim();
-      if (!value) {
-        return;
-      }
-      if (this.activeChat) {
-        this.sendText(this.activeChat, value);
-      }
-      this.messageInput.value = "";
-      this.messageInput.style.height = "auto";
-    });
-
-    this.messageInput.addEventListener("input", () => {
-      this.messageInput.style.height = "auto";
-      this.messageInput.style.height = `${Math.min(this.messageInput.scrollHeight, 160)}px`;
-    });
-
-    this.fileInput.addEventListener("change", () => {
-      const file = this.fileInput.files?.[0];
-      if (file && this.activeChat) {
-        this.sendFile(this.activeChat, file);
-      }
-      this.fileInput.value = "";
-    });
-  }
-
-  restoreContactsFromCookie() {
-    const cookie = readCookie(CONTACT_COOKIE);
-    if (!cookie) return;
-    try {
-      const contacts = JSON.parse(cookie);
-      if (Array.isArray(contacts)) {
-        contacts.forEach((entry) => {
-          if (entry.peerId && entry.profile) {
-            this.addOrUpdateContact(entry.peerId, entry.profile, { persist: false, online: false });
-          }
-        });
-      }
-    } catch (err) {
-      console.warn("Unable to parse contact cookie", err);
+      console.warn("Failed to parse stored contacts", err);
     }
   }
+}
 
-  persistContacts() {
-    const records = Array.from(this.contacts.values()).map((entry) => ({
-      peerId: entry.peerId,
-      profile: entry.profile,
-    }));
-    writeCookie(CONTACT_COOKIE, JSON.stringify(records));
+function setStatus(text, accent = true) {
+  statusEl.textContent = text;
+  statusEl.style.color = accent ? "" : "var(--text-secondary)";
+  statusEl.style.background = accent ? "rgba(56, 189, 248, 0.1)" : "rgba(148, 163, 184, 0.2)";
+}
+
+function formatTimestamp(ts) {
+  const date = new Date(ts * 1000);
+  return `${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function ensureChat(peerId, contact) {
+  if (!state.chats[peerId]) {
+    state.chats[peerId] = {
+      contact,
+      messages: [],
+      loaded: false,
+      hasUnread: false,
+    };
   }
-
-  connect() {
-    this.networkStatus.textContent = "Connecting…";
-    this.networkStatus.classList.remove("online");
-    const socket = new WebSocket(SIGNALING_URL);
-    socket.addEventListener("open", () => {
-      this.networkStatus.textContent = "Online";
-      this.networkStatus.classList.add("online");
-      this.sendProfile();
-    });
-    socket.addEventListener("message", (event) => {
-      const payload = JSON.parse(event.data);
-      this.handleSignal(payload);
-    });
-    socket.addEventListener("close", () => {
-      this.networkStatus.textContent = "Offline";
-      this.networkStatus.classList.remove("online");
-      this.clientId = null;
-      setTimeout(() => this.connect(), 2000);
-    });
-    socket.addEventListener("error", () => {
-      socket.close();
-    });
-    this.socket = socket;
+  if (!state.openChats.includes(peerId)) {
+    state.openChats.push(peerId);
   }
+}
 
-  sendProfile() {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.clientId) {
-      return;
-    }
-    this.socket.send(
-      JSON.stringify({
-        type: "profile",
-        profile: {
-          name: this.identity.name,
-          color: this.identity.color,
-        },
-      })
-    );
+function renderContacts() {
+  contactListEl.innerHTML = "";
+  const combined = new Map();
+  for (const contact of state.knownContacts) {
+    combined.set(contact.id, contact);
   }
-
-  pingPresence() {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ type: "ping" }));
-    }
+  for (const contact of state.contacts) {
+    combined.set(contact.id, contact);
   }
-
-  handleSignal(message) {
-    const { type } = message;
-    switch (type) {
-      case "welcome":
-        this.clientId = message.clientId;
-        message.peers.forEach((entry) => {
-          this.addOrUpdateContact(entry.peerId, entry.profile ?? null, { online: true });
-        });
-        this.sendProfile();
-        break;
-      case "peer-status":
-        this.onPeerStatus(message);
-        break;
-      case "offer":
-        this.onOffer(message);
-        break;
-      case "answer":
-        this.onAnswer(message);
-        break;
-      case "candidate":
-        this.onCandidate(message);
-        break;
-      case "hangup":
-        this.onHangup(message);
-        break;
-      default:
-        break;
-    }
+  const allContacts = Array.from(combined.values()).sort((a, b) => b.last_seen - a.last_seen);
+  if (allContacts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No devices discovered yet. We'll keep listening.";
+    contactListEl.appendChild(empty);
+    setStatus("Listening for peers", false);
+    return;
   }
+  setStatus(`Connected to ${allContacts.length} device${allContacts.length > 1 ? "s" : ""}`);
+  allContacts.forEach((contact) => {
+    const card = document.createElement("div");
+    card.className = "contact-card";
+    if (state.activeChatId === contact.id) {
+      card.classList.add("active");
+    }
+    card.innerHTML = `
+      <h3 class="contact-name">${contact.name}</h3>
+      <p class="contact-meta">${contact.host}:${contact.port}</p>
+    `;
+    card.addEventListener("click", () => openChat(contact));
+    contactListEl.appendChild(card);
+  });
+}
 
-  onPeerStatus({ event, peerId, profile }) {
-    if (peerId === this.clientId) return;
-    if (event === "left") {
-      const contact = this.contacts.get(peerId);
-      if (contact) {
-        contact.online = false;
-        contact.element.classList.remove("online");
-        contact.element.classList.add("offline");
-      }
-      const session = this.sessions.get(peerId);
-      if (session) {
-        session.online = false;
-        if (session.connection) {
-          session.connection.close();
-          session.connection = null;
-        }
-        if (session.channel) {
-          session.channel.close();
-          session.channel = null;
-        }
-        this.appendSystemMessage(session, "Peer disconnected");
-        if (this.activeChat === peerId) {
-          this.conversationNote.textContent = "Offline";
-        }
-      }
-      return;
+function renderTabs() {
+  tabsEl.innerHTML = "";
+  state.openChats.forEach((peerId) => {
+    const chat = state.chats[peerId];
+    if (!chat) return;
+    const tab = document.createElement("div");
+    tab.className = "chat-tab";
+    if (state.activeChatId === peerId) {
+      tab.classList.add("active");
+      chat.hasUnread = false;
     }
-
-    if (profile) {
-      this.addOrUpdateContact(peerId, profile, { online: true });
-      const session = this.sessions.get(peerId);
-      if (session) {
-        session.profile = profile;
-        this.updateTab(session);
-        if (this.activeChat === peerId) {
-          this.conversationName.textContent = profile.name;
-        }
-      }
-    } else if (event === "joined") {
-      this.addOrUpdateContact(peerId, null, { online: true });
+    if (chat.hasUnread) {
+      tab.classList.add("unread");
     }
-  }
-
-  addOrUpdateContact(peerId, profile, { persist = true, online = true } = {}) {
-    let entry = this.contacts.get(peerId);
-    if (!entry) {
-      const template = document.querySelector("#contact-template");
-      const element = template.content.firstElementChild.cloneNode(true);
-      element.dataset.peerId = peerId;
-      element.addEventListener("click", () => {
-        this.openChat(peerId);
-      });
-      this.contactList.appendChild(element);
-      entry = {
-        peerId,
-        profile: profile ?? { name: `Unknown ${peerId.slice(0, 4)}`, color: "#777" },
-        element,
-        online,
-      };
-      this.contacts.set(peerId, entry);
-    }
-    if (profile) {
-      entry.profile = profile;
-    }
-    entry.online = online;
-    const nameEl = entry.element.querySelector(".contact-name");
-    const presenceEl = entry.element.querySelector(".presence-indicator");
-    nameEl.textContent = entry.profile.name;
-    entry.element.style.setProperty("--avatar-color", entry.profile.color || "#777");
-    entry.element.classList.toggle("online", online);
-    entry.element.classList.toggle("offline", !online);
-    presenceEl.title = online ? "Online" : "Offline";
-    const session = this.sessions.get(peerId);
-    if (session) {
-      session.profile = entry.profile;
-      session.online = online;
-      this.updateTab(session);
-      if (this.activeChat === peerId) {
-        this.conversationName.textContent = session.profile.name;
-        this.conversationNote.textContent = online ? "Connected" : "Offline";
-      }
-    }
-    if (persist) {
-      this.persistContacts();
-    }
-  }
-
-  ensureSession(peerId) {
-    let session = this.sessions.get(peerId);
-    if (!session) {
-      const contact = this.contacts.get(peerId);
-      session = {
-        peerId,
-        profile: contact?.profile || { name: `Guest ${peerId.slice(0, 4)}`, color: "#888" },
-        connection: null,
-        channel: null,
-        messages: [],
-        tab: this.createTab(peerId, contact?.profile),
-        unread: 0,
-        online: contact?.online ?? false,
-      };
-      this.sessions.set(peerId, session);
-    }
-    return session;
-  }
-
-  createTab(peerId, profile) {
-    const template = document.querySelector("#tab-template");
-    const tab = template.content.firstElementChild.cloneNode(true);
-    const avatar = tab.querySelector(".tab-avatar");
-    const name = tab.querySelector(".tab-name");
-    const unread = tab.querySelector(".tab-unread");
-    avatar.style.background = profile?.color || "#666";
-    avatar.textContent = profile?.name?.[0] ?? "?";
-    name.textContent = profile?.name || `Guest ${peerId.slice(0, 4)}`;
-    tab.dataset.peerId = peerId;
+    tab.innerHTML = `
+      <span>${chat.contact.name}</span>
+      <button class="close" title="Close chat">×</button>
+    `;
     tab.addEventListener("click", (event) => {
-      if (event.target.classList.contains("tab-close")) {
-        this.closeSession(peerId, true);
-        return;
+      if (event.target instanceof HTMLElement && event.target.classList.contains("close")) {
+        closeChat(peerId);
+        event.stopPropagation();
+      } else {
+        activateChat(peerId);
       }
-      this.selectChat(peerId);
     });
-    tab.dataset.unread = "0";
-    unread.hidden = true;
-    this.tabContainer.appendChild(tab);
-    return tab;
+    tabsEl.appendChild(tab);
+  });
+}
+
+function activateChat(peerId) {
+  if (!state.chats[peerId]) return;
+  state.activeChatId = peerId;
+  renderTabs();
+  renderConversation();
+}
+
+function closeChat(peerId) {
+  const idx = state.openChats.indexOf(peerId);
+  if (idx >= 0) {
+    state.openChats.splice(idx, 1);
   }
-
-  updateTab(session) {
-    const avatar = session.tab.querySelector(".tab-avatar");
-    const name = session.tab.querySelector(".tab-name");
-    avatar.style.background = session.profile.color || "#666";
-    avatar.textContent = session.profile.name?.[0] ?? "?";
-    name.textContent = session.profile.name || name.textContent;
+  if (state.activeChatId === peerId) {
+    state.activeChatId = state.openChats[state.openChats.length - 1] || null;
   }
+  renderTabs();
+  renderConversation();
+}
 
-  selectChat(peerId) {
-    const session = this.ensureSession(peerId);
-    this.activeChat = peerId;
-    this.placeholder.hidden = true;
-    this.conversation.hidden = false;
-    this.conversationName.textContent = session.profile.name;
-    this.conversationNote.textContent = session.online ? "Connected" : "Connecting…";
-    this.tabContainer.querySelectorAll(".chat-tab").forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.peerId === peerId);
-    });
-    this.renderMessages(session);
-    this.resetUnread(session);
-    if (!session.connection) {
-      this.establishConnection(peerId, true);
-    }
+function renderConversation() {
+  if (!state.activeChatId || !state.chats[state.activeChatId]) {
+    conversationEl.hidden = true;
+    placeholderEl.hidden = false;
+    return;
   }
-
-  renderMessages(session) {
-    this.messageList.innerHTML = "";
-    session.messages.forEach((entry) => this.renderMessage(entry));
-    this.messageList.scrollTop = this.messageList.scrollHeight;
-  }
-
-  renderMessage(entry) {
-    let templateId = "message-template";
-    if (entry.kind === "file") {
-      templateId = "file-template";
-    }
-    const template = document.querySelector(`#${templateId}`);
-    const element = template.content.firstElementChild.cloneNode(true);
-    element.classList.add(entry.direction);
-    const meta = element.querySelector(".meta");
-    const timestamp = new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    meta.textContent = `${entry.author} • ${timestamp}`;
-    if (entry.kind === "text") {
-      element.querySelector(".bubble-content").textContent = entry.text;
-    } else if (entry.kind === "file") {
-      element.querySelector(".file-name").textContent = entry.file.name;
-      element.querySelector(".file-size").textContent = this.formatFileSize(entry.file.size);
-      const link = document.createElement("a");
-      link.href = entry.file.url;
-      link.textContent = "Download";
-      link.className = "file-download";
-      link.download = entry.file.name;
-      element.querySelector(".bubble").appendChild(link);
-    } else if (entry.kind === "system") {
-      element.classList.add("system");
-      element.querySelector(".bubble-content").textContent = entry.text;
-      meta.textContent = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-    }
-    this.messageList.appendChild(element);
-    this.messageList.scrollTop = this.messageList.scrollHeight;
-  }
-
-  formatFileSize(size) {
-    const units = ["B", "KB", "MB", "GB"];
-    let value = size;
-    let index = 0;
-    while (value >= 1024 && index < units.length - 1) {
-      value /= 1024;
-      index += 1;
-    }
-    return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
-  }
-
-  appendMessage(session, entry, { quiet = false } = {}) {
-    session.messages.push(entry);
-    if (this.activeChat === session.peerId) {
-      this.renderMessage(entry);
-    } else if (!quiet) {
-      session.unread += 1;
-      const badge = session.tab.querySelector(".tab-unread");
-      badge.textContent = session.unread;
-      badge.hidden = false;
-      session.tab.classList.add("has-unread");
-    }
-  }
-
-  appendSystemMessage(session, text) {
-    this.appendMessage(
-      session,
-      {
-        direction: "system",
-        kind: "system",
-        text,
-        timestamp: Date.now(),
-        author: "System",
-      },
-      { quiet: this.activeChat === session.peerId }
-    );
-  }
-
-  resetUnread(session) {
-    session.unread = 0;
-    const badge = session.tab.querySelector(".tab-unread");
-    badge.hidden = true;
-    session.tab.classList.remove("has-unread");
-  }
-
-  async establishConnection(peerId, initiator) {
-    const session = this.ensureSession(peerId);
-    if (session.connection) {
-      return session.connection;
-    }
-    const pc = new RTCPeerConnection({ iceServers: STUN_CONFIG });
-    session.connection = pc;
-    session.online = true;
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && this.socket && this.socket.readyState === WebSocket.OPEN) {
-        this.socket.send(
-          JSON.stringify({
-            type: "candidate",
-            target: peerId,
-            candidate: event.candidate,
-          })
-        );
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-        this.appendSystemMessage(session, "Connection lost");
-        this.closeSession(peerId, false);
-      }
-    };
-
-    if (initiator) {
-      const channel = pc.createDataChannel("lantern");
-      this.configureChannel(peerId, channel);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (this.activeChat === peerId) {
-        this.conversationNote.textContent = "Connecting…";
-      }
-      this.socket?.send(
-        JSON.stringify({
-          type: "offer",
-          target: peerId,
-          description: offer,
-        })
-      );
-    } else {
-      pc.ondatachannel = (event) => {
-        this.configureChannel(peerId, event.channel);
-      };
-    }
-
-    return pc;
-  }
-
-  configureChannel(peerId, channel) {
-    const session = this.ensureSession(peerId);
-    session.channel = channel;
-    session.online = true;
-    channel.binaryType = "arraybuffer";
-    channel.onopen = () => {
-      this.appendSystemMessage(session, "Channel ready");
-      if (this.activeChat === peerId) {
-        this.conversationNote.textContent = "Connected";
-      }
-    };
-    channel.onclose = () => {
-      this.appendSystemMessage(session, "Channel closed");
-    };
-    channel.onmessage = (event) => {
-      this.receivePacket(peerId, event.data);
-    };
-  }
-
-  async onOffer({ from, description }) {
-    const session = this.ensureSession(from);
-    const pc = await this.establishConnection(from, false);
-    await pc.setRemoteDescription(new RTCSessionDescription(description));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    this.socket?.send(
-      JSON.stringify({
-        type: "answer",
-        target: from,
-        description: answer,
-      })
-    );
-    if (this.activeChat !== from) {
-      this.selectChat(from);
-    }
-  }
-
-  async onAnswer({ from, description }) {
-    const session = this.ensureSession(from);
-    if (!session.connection) return;
-    await session.connection.setRemoteDescription(new RTCSessionDescription(description));
-  }
-
-  async onCandidate({ from, candidate }) {
-    const session = this.ensureSession(from);
-    if (!session.connection || !candidate) return;
-    try {
-      await session.connection.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-      console.error("Failed to add ICE candidate", err);
-    }
-  }
-
-  onHangup({ from }) {
-    this.closeSession(from, false);
-  }
-
-  closeSession(peerId, notify) {
-    const session = this.sessions.get(peerId);
-    if (!session) return;
-    if (session.connection) {
-      session.connection.close();
-    }
-    if (session.channel) {
-      session.channel.close();
-    }
-    session.online = false;
-    if (notify && this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ type: "hangup", target: peerId }));
-    }
-    session.tab.remove();
-    this.sessions.delete(peerId);
-    if (this.activeChat === peerId) {
-      this.activeChat = null;
-      this.conversation.hidden = true;
-      this.placeholder.hidden = false;
-      this.messageList.innerHTML = "";
-    }
-  }
-
-  async sendText(peerId, text) {
-    const session = this.ensureSession(peerId);
-    if (!session.channel || session.channel.readyState !== "open") {
-      await this.establishConnection(peerId, true);
-      if (!session.channel || session.channel.readyState !== "open") {
-        this.appendSystemMessage(session, "Connecting…");
-        return;
-      }
-    }
-    const packet = {
-      kind: "text",
-      text,
-      timestamp: Date.now(),
-      author: this.identity.name,
-    };
-    session.channel.send(JSON.stringify(packet));
-    this.appendMessage(session, {
-      ...packet,
-      direction: "outgoing",
-    });
-  }
-
-  async sendFile(peerId, file) {
-    const session = this.ensureSession(peerId);
-    if (!session.channel || session.channel.readyState !== "open") {
-      await this.establishConnection(peerId, true);
-    }
-    if (!session.channel || session.channel.readyState !== "open") {
-      this.appendSystemMessage(session, "Waiting for channel before sending file");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = base64FromArrayBuffer(reader.result);
-      const packet = {
-        kind: "file",
-        timestamp: Date.now(),
-        author: this.identity.name,
-        file: {
-          name: file.name,
-          size: file.size,
-          mime: file.type || "application/octet-stream",
-          data: base64,
-        },
-      };
-      session.channel.send(JSON.stringify(packet));
-      this.appendMessage(session, {
-        direction: "outgoing",
-        kind: "file",
-        timestamp: packet.timestamp,
-        author: this.identity.name,
-        file: {
-          name: file.name,
-          size: file.size,
-          url: URL.createObjectURL(file),
-        },
-      });
-    };
-    reader.readAsArrayBuffer(file);
-  }
-
-  receivePacket(peerId, payload) {
-    const session = this.ensureSession(peerId);
-    let data = payload;
-    if (typeof payload === "string") {
-      try {
-        data = JSON.parse(payload);
-      } catch (err) {
-        console.warn("Unable to parse payload", err);
-        return;
-      }
-    }
-    if (!data) return;
-
-    if (data.kind === "text") {
-      this.appendMessage(session, {
-        direction: "incoming",
-        kind: "text",
-        text: data.text,
-        timestamp: data.timestamp || Date.now(),
-        author: data.author || session.profile.name,
-      });
-    } else if (data.kind === "file") {
-      const buffer = arrayBufferFromBase64(data.file.data);
-      const blob = new Blob([buffer], { type: data.file.mime || "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
-      this.appendMessage(session, {
-        direction: "incoming",
-        kind: "file",
-        timestamp: data.timestamp || Date.now(),
-        author: data.author || session.profile.name,
-        file: {
-          name: data.file.name,
-          size: data.file.size,
-          url,
-        },
-      });
-    }
-    this.addOrUpdateContact(peerId, session.profile, { persist: true, online: true });
+  const chat = state.chats[state.activeChatId];
+  placeholderEl.hidden = true;
+  conversationEl.hidden = false;
+  conversationNameEl.textContent = chat.contact.name;
+  conversationAddressEl.textContent = `${chat.contact.host}:${chat.contact.port}`;
+  messageListEl.innerHTML = "";
+  chat.messages.forEach((message) => appendMessageElement(message));
+  messageListEl.scrollTop = messageListEl.scrollHeight;
+  if (!chat.loaded) {
+    loadHistory(chat.contact.id);
   }
 }
 
-window.addEventListener("DOMContentLoaded", () => {
-  new LanternApp();
-});
+function appendMessageElement(message) {
+  const node = document.createElement("div");
+  node.className = `message ${message.direction}`;
+  if (message.type === "text") {
+    node.textContent = message.content.text;
+  } else if (message.type === "file") {
+    const link = document.createElement("a");
+    link.href = `data:${message.content.content_type};base64,${message.content.data}`;
+    link.download = message.content.filename;
+    link.textContent = `Download ${message.content.filename}`;
+    link.className = "download";
+    node.innerHTML = `<div>${message.direction === "outgoing" ? "You sent" : "Received"} a file:</div>`;
+    node.appendChild(link);
+  }
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `${message.direction === "outgoing" ? "You" : "Peer"} · ${formatTimestamp(message.timestamp)}`;
+  node.appendChild(meta);
+  messageListEl.appendChild(node);
+}
+
+async function loadHistory(peerId) {
+  try {
+    const response = await fetch(`/api/chats/${encodeURIComponent(peerId)}/history`);
+    if (!response.ok) throw new Error("Unable to fetch history");
+    const data = await response.json();
+    const chat = state.chats[peerId];
+    if (!chat) return;
+    chat.messages = data.messages;
+    chat.loaded = true;
+    if (state.activeChatId === peerId) {
+      messageListEl.innerHTML = "";
+      chat.messages.forEach((message) => appendMessageElement(message));
+      messageListEl.scrollTop = messageListEl.scrollHeight;
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function fetchContacts() {
+  try {
+    const response = await fetch("/api/contacts");
+    const data = await response.json();
+    state.contacts = data.contacts || [];
+    if (state.contacts.length) {
+      saveContactsToCookies(state.contacts);
+    }
+    renderContacts();
+  } catch (err) {
+    console.error("Unable to fetch contacts", err);
+  }
+}
+
+function openChat(contact) {
+  ensureChat(contact.id, contact);
+  renderTabs();
+  activateChat(contact.id);
+}
+
+function handleIncomingEvent(event) {
+  try {
+    const payload = JSON.parse(event.data);
+    if (payload.type === "message") {
+      const peerId = payload.peer_id;
+      const message = payload.message;
+      const contact = state.contacts.find((c) => c.id === peerId) || state.knownContacts.find((c) => c.id === peerId);
+      if (contact) {
+        ensureChat(peerId, contact);
+      }
+      const chat = state.chats[peerId];
+      if (!chat) {
+        return;
+      }
+      chat.messages.push(message);
+      if (state.activeChatId === peerId) {
+        appendMessageElement(message);
+        messageListEl.scrollTop = messageListEl.scrollHeight;
+      } else {
+        chat.hasUnread = true;
+      }
+      renderTabs();
+    }
+  } catch (err) {
+    console.error("Failed to parse event", err);
+  }
+}
+
+function setupEventsSocket() {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws/events`);
+  state.eventsSocket = socket;
+  socket.addEventListener("message", handleIncomingEvent);
+  socket.addEventListener("open", () => {
+    setStatus("Event stream active");
+  });
+  socket.addEventListener("close", () => {
+    setStatus("Reconnecting…", false);
+    setTimeout(setupEventsSocket, 2000);
+  });
+}
+
+function autoSizeTextarea() {
+  messageInputEl.style.height = "auto";
+  messageInputEl.style.height = `${messageInputEl.scrollHeight}px`;
+}
+
+async function sendMessage(text) {
+  if (!state.activeChatId) return;
+  await fetch(`/api/chats/${encodeURIComponent(state.activeChatId)}/message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+async function sendFile(file) {
+  if (!state.activeChatId) return;
+  const form = new FormData();
+  form.append("file", file);
+  await fetch(`/api/chats/${encodeURIComponent(state.activeChatId)}/file`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+function bindUI() {
+  document.getElementById("refresh-contacts").addEventListener("click", () => {
+    fetchContacts();
+  });
+
+  formEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = messageInputEl.value.trim();
+    if (!text) return;
+    messageInputEl.value = "";
+    autoSizeTextarea();
+    await sendMessage(text);
+  });
+
+  messageInputEl.addEventListener("input", autoSizeTextarea);
+  autoSizeTextarea();
+
+  fileInputEl.addEventListener("change", async (event) => {
+    const target = event.target;
+    if (target.files && target.files.length) {
+      const file = target.files[0];
+      await sendFile(file);
+      target.value = "";
+    }
+  });
+}
+
+async function init() {
+  loadContactsFromCookies();
+  renderContacts();
+  bindUI();
+  setupEventsSocket();
+  await fetchContacts();
+  setInterval(fetchContacts, 8000);
+}
+
+init();

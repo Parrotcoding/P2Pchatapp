@@ -1,20 +1,20 @@
 # Lantern Chat
 
-Lantern Chat is a browser-first peer-to-peer chat for local networks. Each participant opens the same web app, which:
+Lantern Chat is a peer-to-peer chat and file sharing experience for local networks. Each device runs the same FastAPI service which:
 
-- Discovers online friends instantly through a shared signaling server.
-- Establishes encrypted WebRTC data channels between browsers for direct messaging and file sharing.
-- Remembers friendly devices with cookie-based contact cards and glowing presence indicators.
-- Supports multiple conversations at once with polished, tabbed chat panels.
+- Discovers peers automatically using UDP broadcast beacons.
+- Exchanges RSA public keys and negotiates AES-GCM session keys for end-to-end encrypted transport.
+- Streams text messages and file payloads directly between peers over WebSockets.
+- Serves a rich, multi-conversation web UI that remembers devices in browser cookies.
 
 ## Features
 
-- **Zero install** – launch the FastAPI app once and every device connects from a browser.
-- **Automatic discovery** – presence updates stream over a lightweight WebSocket signaling hub.
-- **Secure transport** – WebRTC data channels provide end-to-end encryption for text and files.
-- **Multi-chat workspace** – tabs keep parallel conversations organised, with unread badges.
-- **Cookie memories** – returning peers appear instantly from cookies, even before they reconnect.
-- **Elegant dark theme** – a gradient-rich interface tuned for desktops and tablets.
+- **Zero configuration discovery** – devices announce their presence every few seconds and listen for new peers.
+- **Secure by design** – 2048-bit RSA handshakes protect a 256-bit AES session per peer.
+- **Multiple conversations** – open any number of chats, with tabbed navigation and unread badges.
+- **File sharing** – share files of any type; recipients receive a download link in-line.
+- **Cookie contact cards** – known peers persist in cookies for quick reconnects and offline awareness.
+- **Beautiful interface** – gradient-rich dark UI tuned for desktops and tablets.
 
 ## Getting started
 
@@ -25,27 +25,31 @@ pip install -r requirements.txt
 uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Visit <http://localhost:8000> from each browser on the same network. Lantern will exchange presence information through the
-signaling server and automatically negotiate WebRTC channels when you open a chat.
+Open <http://localhost:8000> to access the interface. Repeat the setup on another machine within the same local network to try secure chats and file transfers.
 
 ## Project structure
 
 ```
 backend/
-  app.py          # FastAPI app serving the web UI and WebSocket signaling hub
+  app.py          # FastAPI application, chat orchestration, WebSocket handling
+  discovery.py    # UDP discovery service and identity helpers
+  security.py     # RSA keypair helpers and AES-GCM utilities
+  storage.py      # Contact and session managers
 frontend/
   templates/index.html
   static/
-    app.js        # Client-side app logic, WebRTC sessions, cookie persistence
-    styles.css    # Gradient dark theme and responsive layout
+    app.js        # UI logic, state management, cookie storage
+    styles.css    # Tailored dark theme styling
 ```
 
-## Notes
+Runtime identity files are written to `./runtime/identity.json` for convenience.
 
-- WebRTC requires direct peer reachability. Ensure local firewalls allow peer-to-peer UDP traffic or add TURN servers.
-- File transfers are encoded as base64 payloads on the data channel; large files may take additional time.
-- Cookies are used to persist identities and known peers for a friendlier reconnect experience.
+## Limitations
+
+- LAN broadcast may be blocked on restrictive networks. Ensure UDP broadcast on port 47300 is allowed.
+- File payloads are exchanged as base64 WebSocket messages; very large files may impact memory usage.
+- Browsers need to reach peers directly (no TURN relays). For remote networks, further work is required.
 
 ## License
 
-This project is provided for demonstration purposes. Adapt it to suit your environment.
+This project is provided for demonstration purposes. Customize and extend it to suit your environment.
